@@ -14,7 +14,6 @@ games = {}
 
 
 class GameState:
-
     def __init__(self):
         self.joined_users = []
         self.game_started = False
@@ -23,7 +22,7 @@ class GameState:
         self.description_phase_started = False
         self.user_descriptions = {}
         self.num_rounds = 3
-
+        self.votes = {}
 
 @bot.event
 async def on_ready():
@@ -126,7 +125,7 @@ async def start(interaction: discord.Interaction):
     game = games[interaction.channel_id]
 
     if not game.game_started:
-        if len(game.joined_users) > 2:
+        if len(game.joined_users) >= 1:
             random_word = get_unused_word('nouns.txt', 'used_words.txt')
             game.imposter = random.choice(game.joined_users)
             for user_id in game.joined_users:
@@ -231,9 +230,23 @@ async def recall(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+class VotingDropdown(discord.ui.Select):
+    def __init__(self, options):
+        super().__init__(placeholder="Vote for the Imposter", options=options, min_values=1, max_values=1)
+    
+    async def callback(self, interaction: discord.Interaction):
+        user_id = int(self.values[0])
+        await interaction.response.send_message(f"You voted for {(await bot.fetch_user(user_id)).name}.", ephemeral=True)
+        self.view.votes[interaction.user.id] = user_id
+
+class VotingView(discord.ui.View):
+    def __init__(self, options):
+        super().__init__()
+        self.add_item(VotingDropdown(options))
+        self.votes = {}
+
 @bot.tree.command(name="start_voting", description="Starts the voting process.")
 async def start_voting(interaction: discord.Interaction):
-    # Fetching necessary details from the interaction
     channel = interaction.channel
 
     if channel.id not in games:
@@ -243,35 +256,28 @@ async def start_voting(interaction: discord.Interaction):
     game = games[channel.id]
     print(game)
     try:
-        voting_message, bot_emojis = await initiate_voting(interaction, game)
-        game.voting_message_id = voting_message.id
-        game.bot_emojis = bot_emojis
-        await interaction.response.send_message("Voting has started. Use ?tally to tally the votes when everyone has voted.")
+        options = []
+        for index, user_id in enumerate(game.joined_users):
+            user = await bot.fetch_user(user_id)
+            options.append(discord.SelectOption(label=f"{index+1}. {user.name}", value=str(user_id)))
+        
+        for user_id in game.joined_users:
+            try:
+                user = await bot.fetch_user(user_id)
+                view = VotingView(options)
+                await user.send("Vote for the Imposter using the dropdown below:", view=view)
+                game.votes[user_id] = view.votes
+                print(f"Sent voting dropdown to {user.name} (ID: {user_id})")  # Debug print
+            except Exception as e:
+                print(f"Error sending voting dropdown to user {user_id}: {e}")
+                import traceback
+                traceback.print_exc()
+
+        await interaction.response.send_message("Voting has started. Use /tally to tally the votes when everyone has voted.")
     except Exception as e:
         print(f"Error during voting process: {e}")
+        import traceback
         traceback.print_exc()
-
-
-async def initiate_voting(interaction, game):
-    embed = discord.Embed(title="Vote for the Imposter", description="React with the number corresponding to the user you suspect is the imposter.", color=0xff0000)
-
-    for index, user_id in enumerate(game.joined_users, start=1):
-        user = await bot.fetch_user(user_id)
-        embed.add_field(name=f"{index}. {user.name}", value=user.id, inline=False)
-
-    # !!!!! ERROR???!!
-    voting_message = await interaction.channel.send(embed=embed)
-    print(voting_message)
-
-    number_emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣']
-    bot_emojis = {number_emojis[i]: game.joined_users[i] for i in range(len(game.joined_users))}
-
-    for emoji in bot_emojis:
-        await voting_message.add_reaction(emoji)
-        await asyncio.sleep(2)
-
-    return voting_message, bot_emojis
-
 
 @bot.tree.command(name="tally", description="Tally the votes and determine the outcome.")
 async def tally(interaction: discord.Interaction):
@@ -283,43 +289,18 @@ async def tally(interaction: discord.Interaction):
     
     game = games[channel.id]
     try:
-        voting_message = await channel.fetch_message(game.voting_message_id)
-        await tally_votes(interaction, game, voting_message, game.bot_emojis)
+        votes = {}
+        for user_votes in game.votes.values():
+            for voter, voted_user in user_votes.items():
+                votes[voted_user] = votes.get(voted_user, 0) + 1
+
+        await tally_votes(interaction, game, votes)
     except Exception as e:
         print(f"Error during tallying process: {e}")
         import traceback
         traceback.print_exc()
 
-
-async def tally_votes(interaction, game, voting_message, bot_emojis):
-    voted_users = set()
-    votes = {user_id: 0 for user_id in game.joined_users}
-
-    def check(reaction, user):
-        return user.id in game.joined_users and str(reaction.emoji) in bot_emojis and reaction.message.id == voting_message.id
-
-    try:
-        while len(voted_users) < len(game.joined_users):
-            reaction, user = await bot.wait_for('reaction_add', check=check, timeout=30)
-            if user.id in voted_users:
-                await user.send("You have already voted. You cannot vote twice.")
-                continue
-
-            voted_user_id = bot_emojis[str(reaction.emoji)]
-            if voted_user_id == user.id:
-                await user.send("You cannot vote for yourself. Please vote again.")
-                await voting_message.remove_reaction(reaction.emoji, user)
-                continue
-
-            voted_users.add(user.id)
-            votes[voted_user_id] += 1
-
-        await interaction.response.send_message("Voting completed.")
-
-    except asyncio.TimeoutError:
-        await interaction.response.send_message("Voting time has expired.")
-    
-    await asyncio.sleep(2)
+async def tally_votes(interaction, game, votes):
     majority_vote = max(votes.values(), default=0)
     voted_user_id = [user_id for user_id, count in votes.items() if count == majority_vote]
 
@@ -333,8 +314,6 @@ async def tally_votes(interaction, game, voting_message, bot_emojis):
     else:
         imposter_user = await bot.fetch_user(game.imposter)
         await interaction.response.send_message(f"There was a tie in the votes. No majority decision was made. The imposter was {imposter_user.name}.")
-
-
 
 async def ask_replay(interaction: discord.Interaction):
     await interaction.response.send_message(
