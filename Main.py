@@ -18,7 +18,6 @@ class GameState:
     def __init__(self):
         self.joined_users = []
         self.game_started = False
-        self.voting_message = None
         self.imposter = None
         self.bot_emojis = {}
         self.description_phase_started = False
@@ -233,8 +232,7 @@ async def recall(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="start_voting", description="Starts the voting process.")
-async def start_voting(interaction):
-    await asyncio.sleep(10)
+async def start_voting(interaction: discord.Interaction):
     # Fetching necessary details from the interaction
     channel = interaction.channel
 
@@ -243,15 +241,13 @@ async def start_voting(interaction):
         return
 
     game = games[channel.id]
+    print(game)
     try:
-        await asyncio.sleep(10)
         voting_message, bot_emojis = await initiate_voting(interaction, game)
         game.voting_message_id = voting_message.id
-        await asyncio.sleep(10)
         game.bot_emojis = bot_emojis
-        await asyncio.sleep(2)
+        await interaction.response.send_message("Voting has started. Use ?tally to tally the votes when everyone has voted.")
     except Exception as e:
-        await interaction.response.send_message(f"An error occurred during the voting process: {e}", ephemeral=True)
         print(f"Error during voting process: {e}")
         traceback.print_exc()
 
@@ -263,56 +259,37 @@ async def initiate_voting(interaction, game):
         user = await bot.fetch_user(user_id)
         embed.add_field(name=f"{index}. {user.name}", value=user.id, inline=False)
 
-    # Sending the embed as a message
+    # !!!!! ERROR???!!
     voting_message = await interaction.channel.send(embed=embed)
+    print(voting_message)
 
     number_emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣']
-    await asyncio.sleep(10)
     bot_emojis = {number_emojis[i]: game.joined_users[i] for i in range(len(game.joined_users))}
 
     for emoji in bot_emojis:
         await voting_message.add_reaction(emoji)
         await asyncio.sleep(2)
 
-    print("allgood ")
     return voting_message, bot_emojis
 
-async def fetch_message_with_delay(channel, message_id):
-    # Function to fetch a message with a delay to avoid rate limiting
-    await asyncio.sleep(2)  # Add a delay of 2 seconds
-    return await channel.fetch_message(message_id)
 
 @bot.tree.command(name="tally", description="Tally the votes and determine the outcome.")
 async def tally(interaction: discord.Interaction):
+    channel = interaction.channel
+
+    if channel.id not in games:
+        await interaction.response.send_message("No game has been set up in this channel. Use /play to start a new game.", ephemeral=True)
+        return
+    
+    game = games[channel.id]
     try:
-        # Fetch necessary details from the interaction
-        guild = interaction.guild
-        channel = interaction.channel
-
-        if channel is None:
-            await interaction.response.send_message("This command must be used in a text channel.", ephemeral=True)
-            return
-
-        if channel.id not in games:
-            await interaction.response.send_message("No game has been set up in this channel. Use ?play to start a new game.", ephemeral=True)
-            return
-
-        game = games[channel.id]
-
-        # Fetching the voting message
-        voting_message = await fetch_message_with_delay(channel, game.voting_message_id)
-        if not voting_message:
-            await interaction.response.send_message("Voting message not found or expired.", ephemeral=True)
-            return
-
+        voting_message = await channel.fetch_message(game.voting_message_id)
         await tally_votes(interaction, game, voting_message, game.bot_emojis)
-
-    except asyncio.TimeoutError:
-        await interaction.response.send_message("Voting time has expired.", ephemeral=True)
-
     except Exception as e:
-        await interaction.response.send_message(f"An error occurred during the tallying process: {e}", ephemeral=True)
         print(f"Error during tallying process: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 async def tally_votes(interaction, game, voting_message, bot_emojis):
     voted_users = set()
@@ -337,15 +314,25 @@ async def tally_votes(interaction, game, voting_message, bot_emojis):
             voted_users.add(user.id)
             votes[voted_user_id] += 1
 
-        await interaction.response.send_message("Voting completed.", ephemeral=True)
+        await interaction.response.send_message("Voting completed.")
 
     except asyncio.TimeoutError:
-        await interaction.response.send_message("Voting time has expired.", ephemeral=True)
+        await interaction.response.send_message("Voting time has expired.")
+    
+    await asyncio.sleep(2)
+    majority_vote = max(votes.values(), default=0)
+    voted_user_id = [user_id for user_id, count in votes.items() if count == majority_vote]
 
-    except Exception as e:
-        await interaction.response.send_message(f"An error occurred during tallying votes: {e}", ephemeral=True)
-        print(f"Error during tallying votes: {e}")
-        traceback.print_exc()
+    if len(voted_user_id) == 1:
+        voted_user_id = voted_user_id[0]
+        if voted_user_id == game.imposter:
+            await interaction.response.send_message(f"Congratulations! You win. The user you suspected ({(await bot.fetch_user(voted_user_id)).name}) was the imposter!")
+        else:
+            imposter_user = await bot.fetch_user(game.imposter)
+            await interaction.response.send_message(f"Sorry, you lose. The imposter was {imposter_user.name}.")
+    else:
+        imposter_user = await bot.fetch_user(game.imposter)
+        await interaction.response.send_message(f"There was a tie in the votes. No majority decision was made. The imposter was {imposter_user.name}.")
 
 
 
@@ -407,26 +394,6 @@ async def quit_game(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("You are not in the game.",
                                                 ephemeral=True)
-
-
-@bot.tree.command(name="rounds",
-                  description="Set the number of rounds for the game.")
-async def set_rounds(interaction: discord.Interaction, num_rounds: int):
-    if interaction.channel_id not in games:
-        await interaction.response.send_message(
-            "No game has been set up in this channel. Use /play to start a new game.",
-            ephemeral=True)
-        return
-
-    game = games[interaction.channel_id]
-
-    if num_rounds < 3:
-        await interaction.response.send_message(
-            "The number of rounds must be at least 3.", ephemeral=True)
-    else:
-        game.num_rounds = num_rounds
-        await interaction.response.send_message(
-            f"The number of description rounds has been set to {num_rounds}.")
 
 
 @bot.tree.command(name="resets", description="Force quit the current game.")
