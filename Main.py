@@ -1,7 +1,7 @@
 import asyncio
 import os
-import traceback
 import random
+import traceback
 import discord
 from discord import Intents
 from discord.ext import commands
@@ -12,17 +12,35 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="/", intents=discord.Intents.all())
 games = {}
 
-
 class GameState:
     def __init__(self):
         self.joined_users = []
         self.game_started = False
         self.imposter = None
-        self.bot_emojis = {}
         self.description_phase_started = False
         self.user_descriptions = {}
         self.num_rounds = 3
         self.votes = {}
+        self.message_id = None
+        self.missed_rounds = {}
+        self.votes_received = 0
+
+class VotingDropdown(discord.ui.Select):
+    def __init__(self, options, game):
+        super().__init__(placeholder="Vote for the Imposter", options=options, min_values=1, max_values=1)
+        self.game = game  # Pass the game object to the dropdown
+
+    async def callback(self, interaction: discord.Interaction):
+        user_id = int(self.values[0])
+        self.game.votes[interaction.user.id] = user_id  # Record the vote
+        self.game.votes_received += 1  # Increment the votes received counter
+        await interaction.response.send_message(f"You voted for {(await bot.fetch_user(user_id)).name}.", ephemeral=True)
+
+class VotingView(discord.ui.View):
+    def __init__(self, options, game):
+        super().__init__()
+        self.add_item(VotingDropdown(options, game))
+        
 
 @bot.event
 async def on_ready():
@@ -33,18 +51,37 @@ async def on_ready():
     except Exception as e:
         print(e)
 
+class JoinButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Join Game", style=discord.ButtonStyle.green)
+
+    async def callback(self, interaction: discord.Interaction):
+        game = games.get(interaction.channel.id)
+        if game and interaction.user.id not in game.joined_users:
+            game.joined_users.append(interaction.user.id)
+            
+            # Update the embed message
+            channel = interaction.channel
+            message = await channel.fetch_message(game.message_id)
+            embed = message.embeds[0]
+            embed.description = f"Click the button below to join the game!\n\n**Players joined: {len(game.joined_users)}**"
+            await message.edit(embed=embed)
+            
+            await interaction.response.send_message(f"{interaction.user.name} has joined the game!", ephemeral=True)
+        else:
+            await interaction.response.send_message("You have already joined the game.", ephemeral=True)
+
+class JoinGameView(discord.ui.View):
+    def __init__(self):
+        super().__init__()
+        self.add_item(JoinButton())
 
 @bot.tree.command(
     name="play",
-    description="Start a new game or join an existing game in the channel.")
+    description="Start a new game or join an existing game in the channel."
+)
 async def play(interaction: discord.Interaction):
-    if interaction.guild is None:
-        await interaction.response.send_message(
-            "This command can only be used in a server channel.",
-            ephemeral=True)
-        return
-
-    if interaction.channel is None:
+    if interaction.guild is None or interaction.channel is None:
         await interaction.response.send_message(
             "This command can only be used in a server channel.",
             ephemeral=True)
@@ -56,38 +93,60 @@ async def play(interaction: discord.Interaction):
     game = games[interaction.channel.id]
 
     if not game.game_started:
-        embed = discord.Embed(title="Game Start",
-                              description="React with ✅ if you want to play!",
-                              color=0x00ff00)
-        await interaction.response.send_message(embed=embed, ephemeral=False)
-        message = await interaction.original_response(
-        )  # Fetch the message from the interaction response
+        embed = discord.Embed(
+            title="Game Start",
+            description="Click the button below to join the game!\n\n**Players joined: 0**",
+            color=0x00ff00
+        )
+        view = JoinGameView()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
+        message = await interaction.original_response()  # Fetch the message from the interaction response
         game.message_id = message.id
-        await message.add_reaction("✅")
     else:
-        await interaction.response.send_message("Message me the number 41",
-                                                ephemeral=True)
+        await interaction.response.send_message(
+            "A game is already in progress in this channel.",
+            ephemeral=True
+        )
 
-
-@bot.event
-async def on_raw_reaction_add(payload):
-    if payload.channel_id not in games:
+@bot.tree.command(
+    name="start",
+    description="Start the current game"
+)
+async def start(interaction: discord.Interaction):
+    if interaction.channel.id not in games:
+        await interaction.response.send_message(
+            "No game has been set up in this channel. Use /play to start a new game.",
+            ephemeral=True
+        )
         return
 
-    game = games[payload.channel_id]
+    game = games[interaction.channel.id]
 
     if not game.game_started:
-        if payload.emoji.name == "✅" and payload.message_id == game.message_id and payload.member and not payload.member.bot and payload.user_id not in game.joined_users:
-            game.joined_users.append(payload.user_id)
-            user = await bot.fetch_user(payload.user_id)
-            await user.send("You have joined the queue")
+        if len(game.joined_users) >= 3:
+            random_word = get_unused_word('nouns.txt', 'used_words.txt')
+            game.imposter = random.choice(game.joined_users)
+            for user_id in game.joined_users:
+                try:
+                    user = await bot.fetch_user(user_id)
+                    if user_id == game.imposter:
+                        await user.send("You are the imposter!")
+                    else:
+                        await user.send(f"The word is: {random_word}")
+                except discord.DiscordException as e:
+                    print(f"Failed to send a message to user {user_id}: {e}")
+            game.game_started = True
+            await interaction.response.send_message("The game has started!")
+        else:
+            await interaction.response.send_message(
+                "Not enough users have joined yet.",
+                ephemeral=True
+            )
     else:
-        member = payload.member
-        if member:
-            #No idea help me
-            print()
-        member = payload.member
-
+        await interaction.response.send_message(
+            "The game has already started.",
+            ephemeral=True
+        )
 
 def get_unused_word(words_file, used_words_file):
     with open(words_file, 'r') as f:
@@ -113,37 +172,6 @@ def get_unused_word(words_file, used_words_file):
 
     return random_word
 
-
-@bot.tree.command(name="start", description="Start the current game")
-async def start(interaction: discord.Interaction):
-    if interaction.channel_id not in games:
-        await interaction.response.send_message(
-            "No game has been set up in this channel. Use /play to start a new game.",
-            ephemeral=True)
-        return
-
-    game = games[interaction.channel_id]
-
-    if not game.game_started:
-        if len(game.joined_users) >= 1:
-            random_word = get_unused_word('nouns.txt', 'used_words.txt')
-            game.imposter = random.choice(game.joined_users)
-            for user_id in game.joined_users:
-                user = await bot.fetch_user(user_id)
-                if user_id == game.imposter:
-                    await user.send("You are the imposter!")
-                else:
-                    await user.send(f"The word is: {random_word}")
-            game.game_started = True
-            await interaction.response.send_message("The game has started!")
-        else:
-            await interaction.response.send_message(
-                "Not enough users have joined yet.", ephemeral=True)
-    else:
-        await interaction.response.send_message(
-            "The game has already started.", ephemeral=True)
-
-
 @bot.tree.command(name="describe", description="Users describe their words.")
 async def describe(interaction: discord.Interaction):
     if interaction.channel_id not in games:
@@ -159,6 +187,10 @@ async def describe(interaction: discord.Interaction):
         await interaction.response.send_message(
             "Description phase has started. Users, please describe your words one by one."
         )
+
+        # Initialize missed rounds tracking
+        for user_id in game.joined_users:
+            game.missed_rounds[user_id] = 0
 
         # Iterate over rounds
         for round_number in range(game.num_rounds):
@@ -190,7 +222,14 @@ async def describe(interaction: discord.Interaction):
                 except asyncio.TimeoutError:
                     await interaction.followup.send(
                         f"{user.mention}, you took too long to respond. Your description was not recorded."
+                    )
+                    game.missed_rounds[user_id] += 1
+
+                    if game.missed_rounds[user_id] > 2:
+                        await interaction.followup.send(
+                            f"{user.mention} has been removed from the game for missing too many rounds."
                         )
+                        game.joined_users.remove(user_id)
 
         # After all rounds
         await interaction.followup.send(
@@ -229,22 +268,6 @@ async def recall(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
-
-class VotingDropdown(discord.ui.Select):
-    def __init__(self, options):
-        super().__init__(placeholder="Vote for the Imposter", options=options, min_values=1, max_values=1)
-    
-    async def callback(self, interaction: discord.Interaction):
-        user_id = int(self.values[0])
-        await interaction.response.send_message(f"You voted for {(await bot.fetch_user(user_id)).name}.", ephemeral=True)
-        self.view.votes[interaction.user.id] = user_id
-
-class VotingView(discord.ui.View):
-    def __init__(self, options):
-        super().__init__()
-        self.add_item(VotingDropdown(options))
-        self.votes = {}
-
 @bot.tree.command(name="start_voting", description="Starts the voting process.")
 async def start_voting(interaction: discord.Interaction):
     channel = interaction.channel
@@ -254,19 +277,20 @@ async def start_voting(interaction: discord.Interaction):
         return
 
     game = games[channel.id]
-    print(game)
+    game.votes_received = 0
+    game.votes = {}  # Initialize the votes dictionary
+
     try:
         options = []
         for index, user_id in enumerate(game.joined_users):
             user = await bot.fetch_user(user_id)
             options.append(discord.SelectOption(label=f"{index+1}. {user.name}", value=str(user_id)))
-        
+
         for user_id in game.joined_users:
             try:
                 user = await bot.fetch_user(user_id)
-                view = VotingView(options)
+                view = VotingView(options, game)  # Pass the game object to the view
                 await user.send("Vote for the Imposter using the dropdown below:", view=view)
-                game.votes[user_id] = view.votes
                 print(f"Sent voting dropdown to {user.name} (ID: {user_id})")  # Debug print
             except Exception as e:
                 print(f"Error sending voting dropdown to user {user_id}: {e}")
@@ -278,7 +302,6 @@ async def start_voting(interaction: discord.Interaction):
         print(f"Error during voting process: {e}")
         import traceback
         traceback.print_exc()
-
 @bot.tree.command(name="tally", description="Tally the votes and determine the outcome.")
 async def tally(interaction: discord.Interaction):
     channel = interaction.channel
@@ -286,13 +309,20 @@ async def tally(interaction: discord.Interaction):
     if channel.id not in games:
         await interaction.response.send_message("No game has been set up in this channel. Use /play to start a new game.", ephemeral=True)
         return
-    
+
     game = games[channel.id]
+
+    # Check if all players have voted
+    if game.votes_received < len(game.joined_users):
+        await interaction.response.send_message(
+            f"All players are required to vote before tallying ({game.votes_received}/{len(game.joined_users)}).", 
+            ephemeral=True)
+        return
+
     try:
         votes = {}
-        for user_votes in game.votes.values():
-            for voter, voted_user in user_votes.items():
-                votes[voted_user] = votes.get(voted_user, 0) + 1
+        for user_id, voted_user in game.votes.items():
+            votes[voted_user] = votes.get(voted_user, 0) + 1
 
         await tally_votes(interaction, game, votes)
     except Exception as e:
@@ -300,7 +330,25 @@ async def tally(interaction: discord.Interaction):
         import traceback
         traceback.print_exc()
 
-async def tally_votes(interaction, game, votes):
+async def ask_replay(interaction: discord.Interaction):
+    view = discord.ui.View()
+
+    class ReplayButton(discord.ui.Button):
+        def __init__(self, label, style):
+            super().__init__(label=label, style=style)
+
+        async def callback(self, interaction: discord.Interaction):
+            if self.label == "Yes":
+                await interaction.response.send_message("Use /play to start a new game.", ephemeral=True)
+            elif self.label == "No":
+                await interaction.response.send_message("Thank you for playing!", ephemeral=True)
+
+    view.add_item(ReplayButton(label="Yes", style=discord.ButtonStyle.green))
+    view.add_item(ReplayButton(label="No", style=discord.ButtonStyle.red))
+
+    await interaction.followup.send("Would you like to play again?", view=view)
+    
+async def tally_votes(interaction: discord.Interaction, game, votes):
     majority_vote = max(votes.values(), default=0)
     voted_user_id = [user_id for user_id, count in votes.items() if count == majority_vote]
 
@@ -315,9 +363,8 @@ async def tally_votes(interaction, game, votes):
         imposter_user = await bot.fetch_user(game.imposter)
         await interaction.response.send_message(f"There was a tie in the votes. No majority decision was made. The imposter was {imposter_user.name}.")
 
-async def ask_replay(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        "Would you like to play again? Type /play to start a new game.")
+    await ask_replay(interaction)
+    
 
 
 def reset_game(channel_id):
@@ -346,14 +393,34 @@ async def status(interaction: discord.Interaction):
 
     game = games[interaction.channel_id]
 
-    status_message = f"Game Started: {game.game_started}\n"
-    status_message += f"Description Phase Started: {game.description_phase_started}\n"
-    status_message += f"Players Joined: {len(game.joined_users)}\n"
+    status_message = (
+        f"Game Started: {game.game_started}\n"
+        f"Description Phase Started: {game.description_phase_started}\n"
+        f"Players Joined: {len(game.joined_users)}\n"
+    )
+    
     for user_id in game.joined_users:
         user = await bot.fetch_user(user_id)
         status_message += f"- {user.name}\n"
 
+    imposter_name = await bot.fetch_user(game.imposter) if game.imposter else 'None'
+
+    if game.missed_rounds:
+        missed_rounds = []
+        for user_id, rounds in game.missed_rounds.items():
+            user = await bot.fetch_user(user_id)
+            missed_rounds.append(f"{user.name}: {rounds}")
+        missed_rounds_str = ', '.join(missed_rounds)
+    else:
+        missed_rounds_str = 'None'
+
+    status_message += (
+        f"Number of Rounds: {game.num_rounds}\n"
+        f"Votes Received: {game.votes_received}\n"
+    )
+
     await interaction.response.send_message(status_message)
+
 
 
 @bot.tree.command(name="quit", description="Quit the current game.")
